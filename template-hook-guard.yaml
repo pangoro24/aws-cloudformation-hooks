@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Guard Hook para asegurar S3 Block Public Acls & Ignore Public Acls
+
+Parameters:
+  GuardRulesS3Bucket:
+    Description: S3 bucket where your rules are
+    Type: String
+  GuardRulesS3Path:
+    Description: where your Guard rules are stored in objects .guard, .zip or tar.gz
+    Type: String
+
+Resources:
+  HookInvocationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - hooks.cloudformation.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${GuardRulesS3Bucket}
+                  - !Sub arn:aws:s3:::${GuardRulesS3Bucket}/*
+
+  GuardHook:
+    Type: AWS::CloudFormation::GuardHook
+    Properties:
+      Alias:  MyCompany::S3Bucket::OwnGuardRule
+      ExecutionRole: !GetAtt HookInvocationRole.Arn
+      FailureMode: FAIL
+      HookStatus: ENABLED
+      RuleLocation:
+        Uri: !Sub "s3://${GuardRulesS3Bucket}/${GuardRulesS3Path}"
+      TargetFilters: 
+        Actions: 
+          - CREATE
+        InvocationPoints:
+          - PRE_PROVISION
+        TargetNames:
+          - AWS::S3::Bucket
+      TargetOperations:
+        - RESOURCE
+
+Outputs:
+  GuardHookArn:
+    Description: ARN del Hook
+    Value: !Ref GuardHook

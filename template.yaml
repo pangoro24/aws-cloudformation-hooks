@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Lambda Hook Example for S3 Bucket Validation
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cfn-hook-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowResourceEvaluation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucket*
+                Resource: "*"
+
+
+  CFNLambdaHookFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cfn-lambda-hook-validator
+      Runtime: python3.12
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          from typing import Any, Dict, Optional
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          SUCCESS = "SUCCESS"
+          FAILED = "FAILED"
+
+          def validate_target_type(target_type: str) -> bool:
+              """
+              Validates if the target type is supported by this hook
+              Args:
+                  target_type: The resource type to validate
+              Returns:
+                  bool: True if the target type is supported, False otherwise
+              """
+              try:
+                  return target_type == "AWS::S3::Bucket"
+              except Exception as e:
+                  logger.error(f"Error validating target type: {str(e)}")
+                  return False
+
+          def evaluate_bucket_compliance(properties: Dict[str, Any]) -> tuple[str, str]:
+              """
+              Evaluates if the S3 bucket complies with public access block requirements
+              Args:
+                  properties: Dictionary containing the bucket properties
+              Returns:
+                  tuple: (status, message) where status is SUCCESS or FAILED
+              """
+              try:
+                  public_access_block_configuration = properties.get('PublicAccessBlockConfiguration', {})
+                  
+                  # Check if PublicAccessBlockConfiguration is present and all settings are True
+                  required_settings = {
+                      'BlockPublicAcls': True,
+                      'BlockPublicPolicy': True,
+                      'IgnorePublicAcls': True,
+                      'RestrictPublicBuckets': True
+                  }
+
+                  if not public_access_block_configuration:
+                      return FAILED, "PublicAccessBlockConfiguration is required for S3 buckets"
+
+                  for setting, required_value in required_settings.items():
+                      if public_access_block_configuration.get(setting) != required_value:
+                          return FAILED, f"S3 bucket must have {setting} set to {required_value}"
+
+                  return SUCCESS, "S3 bucket complies with public access block requirements"
+              except Exception as e:
+                  logger.error(f"Error evaluating bucket compliance: {str(e)}")
+                  return FAILED, f"Error evaluating bucket configuration: {str(e)}"
+
+          def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+              """
+              Main Lambda handler function for the CloudFormation hook
+              Args:
+                  event: Lambda event object
+                  context: Lambda context object
+              Returns:
+                  Dict: Response object containing the validation result
+              """
+              try:
+                  logger.info(f"Received event: {event}")
+
+                  # Extract required information from the event
+                  target_type = event.get("requestData",{}).get('targetType')
+                  # Validate target type
+                  if not validate_target_type(target_type):
+                      return {
+                          "hookStatus": FAILED,
+                          'message': f"Unsupported resource type: {target_type}"
+                      }
+
+                  resource_properties = event.get("requestData",{}).get("targetModel",{}).get('resourceProperties', {})
+                  target_name = event.get("requestData",{}).get('targetLogicalId')
+
+                  
+                  # Evaluate bucket compliance
+                  status, message = evaluate_bucket_compliance(resource_properties)
+
+                  response = {
+                      'hookStatus': status,
+                      'message': message
+                  }
+
+                  logger.info(f"Validation result for {target_name}: {response}")
+                  return response
+
+              except Exception as e:
+                  error_message = f"Unexpected error in hook execution: {str(e)}"
+                  logger.error(error_message)
+                  return {
+                      "hookStatus": FAILED,
+                      'message': error_message
+                  }
+
+
+  HookInvocationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hook-invocation-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: hooks.cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowLambdaInvoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt CFNLambdaHookFunction.Arn
+
+  CFNLambdaHook:
+    Type: AWS::CloudFormation::LambdaHook
+    Properties:
+      Alias: MyCompany::S3Bucket::ExampleValidator
+      ExecutionRole: !GetAtt HookInvocationRole.Arn
+      FailureMode: FAIL
+      HookStatus: ENABLED
+      LambdaFunction: !GetAtt CFNLambdaHookFunction.Arn
+      TargetFilters: 
+        Actions: 
+          - CREATE
+        InvocationPoints:
+          - PRE_PROVISION
+        TargetNames:
+          - AWS::S3::Bucket
+      TargetOperations:
+        - RESOURCE
+
+Outputs:
+  HookTypeName:
+    Value: MyCompany::Hooks::ExampleValidator
+    Description: Nombre del tipo de hook
+  LambdaFunctionName:
+    Value: !Ref CFNLambdaHookFunction
+    Description: Nombre de la función Lambda utilizada en el hook
