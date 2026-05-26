@@ -78,6 +78,8 @@ def evaluate_bucket_compliance(properties: Dict[str, Any]) -> Tuple[str, str, Li
             "annotationName": "S3PublicAccessBlockCompliance",
             "status": "PASSED",
             "statusMessage": "S3 bucket complies with public access block requirements",
+            "remediationMessage": None,
+            "remediationLink": None,
             "severityLevel": "HIGH"
         }
         return SUCCESS, "S3 bucket complies with public access block requirements", [annotation]
@@ -102,18 +104,32 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         Dict: Response object containing the validation result with annotations
     """
+    client_request_token = event.get("clientRequestToken") or event.get("clientRequesttoken") if isinstance(event, dict) else None
     try:
-        logger.info(f"Received event: {event}")
+        # Extract logging variables early
+        target_logical_id = event.get("requestData", {}).get("targetLogicalId")
+        action_invocation_point = event.get("actionInvocationPoint")
+        invocation = event.get("requestContext", {}).get("invocation")
+        callback_context = event.get("requestContext", {}).get("callbackContext")
+
+        logger.info(
+            f"Received event - TargetLogicalId: {target_logical_id}, "
+            f"ActionInvocationPoint: {action_invocation_point}, "
+            f"Invocation: {invocation}. Event details: {event}"
+        )
 
         # Extract required information from the event
         target_type = event.get("requestData", {}).get('targetType')
         
         # Validate target type
         if not validate_target_type(target_type):
-            return {
+            response = {
                 "hookStatus": FAILED,
                 "errorCode": "NonCompliant",
-                'message': f"Unsupported resource type: {target_type}",
+                "message": f"Unsupported resource type: {target_type}",
+                "clientRequestToken": client_request_token,
+                "callbackContext": callback_context,
+                "callbackDelaySeconds": 0,
                 "annotations": [{
                     "annotationName": "S3PublicAccessBlockCompliance",
                     "status": "FAILED",
@@ -121,29 +137,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "remediationMessage": "Must remove public access at a bucket level",
                     "remediationLink": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
                     "severityLevel": "HIGH"
-                }],
-                "clientRequestToken": event.get("clientRequestToken")
+                }]
             }
+            logger.info(f"Validation result for {target_logical_id} (Invocation: {invocation}): {response}")
+            return response
 
         resource_properties = event.get("requestData", {}).get("targetModel", {}).get('resourceProperties', {})
-        target_name = event.get("requestData", {}).get('targetLogicalId')
-        client_request_token = event.get("clientRequestToken")
 
         # Evaluate bucket compliance
         status, message, annotations = evaluate_bucket_compliance(resource_properties)
 
         response = {
-            'hookStatus': status,
-            'message': message,
-            'annotations': annotations,
-            'clientRequestToken': client_request_token
+            "hookStatus": status,
+            "errorCode": "NonCompliant" if status == FAILED else None,
+            "message": message,
+            "clientRequestToken": client_request_token,
+            "callbackContext": callback_context,
+            "callbackDelaySeconds": 0,
+            "annotations": annotations
         }
 
-        # Add errorCode if the hook failed
-        if status == FAILED:
-            response['errorCode'] = "NonCompliant"
-
-        logger.info(f"Validation result for {target_name}: {response}")
+        logger.info(f"Validation result for {target_logical_id} (Invocation: {invocation}): {response}")
         return response
 
     except Exception as e:
@@ -152,7 +166,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {
             "hookStatus": FAILED,
             "errorCode": "InternalFailure",
-            'message': error_message,
+            "message": error_message,
+            "clientRequestToken": client_request_token,
+            "callbackContext": None,
+            "callbackDelaySeconds": 0,
             "annotations": [{
                 "annotationName": "S3PublicAccessBlockCompliance",
                 "status": "FAILED",
@@ -160,6 +177,5 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "remediationMessage": "Must remove public access at a bucket level",
                 "remediationLink": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
                 "severityLevel": "HIGH"
-            }],
-            "clientRequestToken": event.get("clientRequestToken")
+            }]
         }
